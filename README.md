@@ -1,147 +1,145 @@
-# StreamLink：C++ 实时通信实验系统
+# USRP 实时摄像头图传（Windows / C++17）
 
-## 从 GitHub 获取并构建
+现在只按两端理解和使用：**发射端 `transmitter/`，接收端 `receiver/`**。使用两台Windows电脑、两台X310；每端只运行一个启动脚本。
+
+```text
+发送PC摄像头 → FFmpeg/H.264 → video_transmitter → UHD → X310①
+                                                       ↓ 空口
+接收PC播放器 ← FFplay/H.264 ← video_receiver   ← UHD ← X310②
+```
+
+USRP两端使用各自内部时钟。`127.0.0.1`上的UDP只是本机编码器与C++程序之间的接口；正式`backend=usrp`不会通过电脑网络绕过无线链路。
+
+**验证状态：新双端程序已通过MSVC编译及无硬件软件测试。摄像头和实际USRP空口必须在你的设备上验证。当前仍是固定QPSK、无FEC的实验波形，尚无自适应MCS、视频码率闭环和采样时钟偏差跟踪。**
+
+## 目录只看这几个
+
+```text
+transmitter/                  发射端：你在发送电脑上主要改这里
+  config.ini                  摄像头、视频和发射射频配置
+  start.ps1                   一键启动摄像头和C++发送程序
+  list-cameras.ps1            查看摄像头名称/支持格式
+  main.cpp                    读取配置、启动发射应用
+  transmitter_app.cpp         数据包 → OFDM → USRP 的主流程
+receiver/                     接收端：你在接收电脑上主要改这里
+  config.ini                  接收射频和播放器配置
+  start.ps1                   一键启动C++接收程序和播放器
+  main.cpp                    读取配置、启动接收应用
+  receiver_app.cpp            USRP → OFDM解调 → 视频数据包的主流程
+shared/                       两端共用，不复制两份算法
+  radio_device.cpp            UHD设备配置、IQ收发、内部时钟
+  include/modem.hpp           同步、频偏补偿、均衡、解调
+  include/core.hpp            协议、CRC、FFT/QPSK基础函数
+  include/app_config.hpp      配置读取和检查
+  launch.ps1                  进程启动、错误日志、退出清理
+scripts/build-windows.ps1     编译入口
+legacy/                       旧实验命令，日常图传不用看
+```
+
+两端独立开发、生成不同exe，共用同一份协议和波形，防止修改后不兼容。复制/克隆时保留整个仓库，不要只复制其中一个文件夹。
+
+## 第一步：两台电脑更新和编译
+
+安装Visual Studio C++桌面开发、CMake、匹配设备的UHD x64 C++ SDK。FFmpeg/FFplay需加入PATH，或在各端配置里填写exe完整路径。
+
+在Developer PowerShell中，进入仓库根目录：
 
 ```powershell
-git clone https://github.com/SeanChen4019/USRP_system.git
-cd USRP_system
-# 在 Visual Studio 的 x64 Developer PowerShell 中运行：
-.\scripts\build-windows.ps1
-# 目标电脑安装 UHD C++ SDK 后，构建真实设备程序：
+git pull --ff-only
 .\scripts\build-windows.ps1 -WithUhd -UhdRoot 'C:\Program Files\UHD'
 ```
 
-Git 仓库包含源码、文档和测试，不包含本地 `build/`、`out/`、`tools/`、`release/`。因此下文提到的预编译程序、测试日志和随本地项目下载的 FFmpeg 不会随 `git clone` 下载；请先构建。视频演示需自行安装 FFmpeg/FFplay 并加入 PATH，或向脚本传入 `-FFmpeg`、`-FFplay` 完整路径。Windows 构建版本可从 https://www.gyan.dev/ffmpeg/builds/ 获取。
+成功后生成 `build/video_transmitter.exe` 和 `build/video_receiver.exe`。修改C++源码后重新运行这条构建命令。**修改config.ini不需要重新编译，只需停止再启动。**
 
-后续更新在项目目录运行 `git pull --ff-only`，然后重新构建。两台电脑分别使用 `streamlink_usrp tx` 和 `streamlink_usrp rx`；单台回环才使用 `duplex`。首次安装与两机接入见 [硬件说明](docs/HARDWARE.md)，Windows SDK 构建细节见 [Windows 迁移说明](docs/SINGLE_USRP_WINDOWS.md)。
+没有UHD的开发电脑可省略`-WithUhd`编译、测试，但这种程序会明确拒绝`backend=usrp`，不会悄悄改走UDP。
 
-**迁移到另一台Windows电脑、使用单台X310回环：优先阅读 [单机迁移说明](docs/SINGLE_USRP_WINDOWS.md)。** 已新增`duplex`单进程收发模式和通用Windows构建脚本；硬件模式仍待目标SDK编译/设备验证。
+## 第二步：只改各自config.ini
 
-这是为 PC 开发、后续向 RK3588 迁移建立的 C++17 原型。当前完成了可运行的数据流、视频通路、OFDM 软件链路，以及可选 UHD 硬件桥接源码。
+### 发送电脑
 
-**状态必须区分：PC 数据链路和视频测试已通过；真实 X310 空口尚未联调；自动调制编码切换、FEC、自动视频码率闭环尚未实现。不能把本项目当前版本描述为已完成的工业级抗干扰通信系统。**
-
-## 先看到效果
-
-已编译程序：`build/streamlink.exe`，不依赖 Python 运行。Python 仅用于自动化验收脚本。视频编解码使用随项目下载的 FFmpeg，通信链路和 OFDM 用 C++ 实现。
-
-在 PowerShell 中：
+先列出摄像头（不会录制）：
 
 ```powershell
-cd 'E:\个人文件\实习\通信系统'
+.\transmitter\list-cameras.ps1
+```
+
+将视频设备的精确名称填入 `transmitter/config.ini` 的 `camera_name`。再列出该摄像头支持的格式：
+
+```powershell
+.\transmitter\list-cameras.ps1 -Formats
+```
+
+### 两端必查的参数
+
+| 配置项 | 填什么 |
+|---|---|
+| `backend` | 正式图传保留 `usrp` |
+| `device_args` | 此电脑连接的USRP，例如 `addr=192.168.10.2` |
+| `frequency_hz` | 两块子板都支持的实际测试中心频率，单位Hz，两端必须相同；0不能启动 |
+| `sample_rate` | 两端必须相同，默认10000000，即10 MS/s |
+| `antenna` | 根据该子板probe结果填写发送/接收端口，不能猜测 |
+| `gain_db` | 对应端的增益，起始0只是配置值，不等于0 dBm发射功率 |
+| `channel` | 默认逻辑通道0；仅在你确认通道映射后修改 |
+| `uhd_bin` | 对应电脑UHD的bin目录 |
+
+发射端视频参数：默认1280×720、30fps、3Mbps，用于先跑通。摄像头支持1080p30、链路稳定后，可以设置 `width=1920`、`height=1080`、`fps=30`、`bitrate_mbps=6`。分辨率和帧率必须是摄像头支持的采集组合。
+
+`ffmpeg`/`ffplay`可填完整exe路径；路径本身不要再加引号。`video_port`通常不用改。`test_link_address`只给明确的UDP软件测试使用，正式空口模式忽略它。
+
+## 第三步：先检查配置，再启动
+
+两台电脑分别执行（此操作不会打开摄像头或USRP）：
+
+```powershell
+# 发送电脑
+.\transmitter\start.ps1 -CheckOnly
+# 接收电脑
+.\receiver\start.ps1 -CheckOnly
+```
+
+检查通过后，**先启动接收端**：
+
+```powershell
+.\receiver\start.ps1
+```
+
+然后在**发送电脑**启动：
+
+```powershell
+.\transmitter\start.ps1
+```
+
+发射端使用你配置的真实摄像头；接收端打开视频窗口。默认持续运行，按Ctrl+C停止。终端每秒显示业务速率、包数、无效包和射频错误计数。日志位于 `out/transmitter-时间/` 或 `out/receiver-时间/`。
+
+如果重启了发射端，也重新启动接收端；当前接收端锁定首个会话，避免旧任务混入。
+
+## 出错看哪里
+
+| 现象 | 检查 |
+|---|---|
+| 尚未填写频率/天线/摄像头 | 按错误文字修改对应config.ini |
+| `UHD not compiled` | 重新使用 `-WithUhd` 编译 |
+| 没有生成exe | 看构建时第一条编译错误，不运行旧exe冒充新版本 |
+| 摄像头打不开 | `camera.err.log`；设备名称、格式、Windows相机权限、是否被其他应用占用 |
+| 找不到USRP/版本不匹配 | `link.err.log`；IP、网口、UHD与FPGA兼容 |
+| 收不到CRC有效包 | 两端实际频率/采样率、端口、射频接线/天线、增益和overflow |
+| 收到数据但没有画面 | `player.err.log`；码流丢失/等待关键帧、播放器与视频端口 |
+| 运行一段时间变差 | 当前仍需验证独立采样时钟下的长期稳定性，不能只加缓存掩盖 |
+
+首次仍建议适当衰减的有线射频回环排除环境因素，再换成天线空口；发射频率、功率按实验室许可条件设置。**本程序没有把单台USRP同频全双工作为前提。**
+
+## 新手从哪里读代码
+
+先读 `transmitter/transmitter_app.cpp` 和 `receiver/receiver_app.cpp`，每个文件只负责一侧流程；不要从FFT开始。更多修改指引见 [二次开发地图](docs/DEVELOPMENT.md)。
+
+## 开发自检（不冒充空口测试）
+
+```powershell
 .\build\streamlink.exe selftest
-.\scripts\benchmark.ps1
-.\scripts\video-demo.ps1 -Seconds 60
+python tests/endpoints.py
+python tests/live_video_smoke.py
 ```
 
-第三条会打开视频窗口，用实时生成的 1080p30 动态测试图经过 H.264 编码、C++ 数据通路后播放。默认编码目标 6 Mbps。播放文件：
+第一项回归已有协议/OFDM；第二项验证新双端程序和停止机制；第三项通过显式`udp_test`和测试图验证视频链路。测试不会偷偷调用摄像头，也不能证明射频性能。
 
-```powershell
-.\scripts\video-demo.ps1 -Seconds 60 -InputFile 'E:\你的视频.mp4'
-```
-
-这两个演示使用本机 UDP 模拟链路，不经过 USRP。测试图和循环播放文件也不能证明摄像头到屏幕时延。
-
-## 当前验证结果（2026-11-02）
-
-| 测试 | 实测 |
-|---|---|
-| 20 Mbps 数据源→30 Mbps 模拟信道→接收端 | 实际发送平均约 19.85 Mbps；12,421,200 字节完整接收 |
-| 重复包概率 20% | 有效数据完整接收；1176 个重复包被过滤 |
-| 随机丢包概率 10% | 接收比例约 89.74%，无错误包被接纳 |
-| 20 Mbps 数据源→8 Mbps 有限队列信道 | 超载时丢弃，接收比例约 39.15%；队列不无限增长 |
-| 真实 OFDM 运算，10 MS/s 模拟时间，3 kHz CFO，30 dB SNR | 5 Mbps 输入的 3,123,600 字节完整恢复 |
-| 1080p30、H.264、目标 6 Mbps | 经 C++ 链路连续解码 180 帧成功，使用无窗口解码验收 |
-
-结果和原始日志分别在 `out/integration-20261102-211713/` 和 `out/video-smoke-20261102-211831/`。
-这些短测试验证功能和初步吞吐，不等于完成 30 分钟稳定性、实际空口、射频干扰或端到端时延验收。
-
-## 组成
-
-```text
-FFmpeg / 摄像头编码器
-  → MPEG-TS/UDP (每个数据报≤1400字节)
-  → streamlink ingress：帧头、会话、序号、CRC
-  → 以下三种后端之一
-      channel：带宽、时延、丢包、重复、有限队列模拟
-      iq-channel：OFDM调制→频偏/噪声→捕获/均衡/解调
-      streamlink_usrp tx → X310 → X310 → streamlink_usrp rx
-  → streamlink rx：完整性校验、重复过滤、CSV、UDP输出
-  → FFplay / 解码器 / RK3588解码显示
-```
-
-UDP 是应用和后端之间的接口。在 UHD 模式中，9001→9002 之间的业务数据通过 IQ 和射频传输；不应同时运行绕过射频的 `channel`。
-
-| 文件 | 职责 |
-|---|---|
-| `src/main.cpp` | 命令行应用、数据源、接收、信道队列、统计 |
-| `include/core.hpp` | 字节序协议、CRC、去重窗口、FFT、OFDM载荷内核 |
-| `include/modem.hpp` | 无线帧、同步捕获、CFO、信道均衡、导频相位校正 |
-| `include/net.hpp` | Windows/POSIX UDP 套接字封装 |
-| `include/iq_channel.hpp` | 有真实基带运算的软件信道 |
-| `src/usrp.cpp` | UHD收发和UDP↔IQ桥接；需SDK，尚未硬件验证 |
-| `tests/` | 数据通路、基带和视频自动验收 |
-| `docs/` | 指标定义、硬件接入、迁移与开发边界 |
-
-## 构建
-
-本机已经适配现有的 Clang 与 sysroot：
-
-```powershell
-.\scripts\build.ps1
-```
-
-通用 CMake（Windows 建议使用 Visual Studio 的开发者终端；Linux 使用 GCC/Clang）：
-
-```text
-cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake --config Release -j
-ctest --test-dir build/cmake -C Release --output-on-failure
-```
-
-Linux/RK3588 的程序名无 `.exe`。MSVC 需要与 UHD SDK 的 ABI 匹配；不要把 MSVC UHD 库直接交给 MinGW 链接。
-
-## 单独运行各端
-
-分别打开三个终端，先接收端，再信道，最后发送端：
-
-```text
-streamlink rx --listen 0.0.0.0:9002 --seconds 60 --csv rx.csv
-streamlink channel --listen 0.0.0.0:9001 --to 127.0.0.1:9002 --mbps 20 --loss 0 --delay-ms 5 --queue-ms 100 --seconds 60
-streamlink tx --to 127.0.0.1:9001 --mbps 12 --seconds 30 --payload 1200
-```
-
-替换第二条，测试基带链路：
-
-```text
-streamlink iq-channel --listen 127.0.0.1:9001 --to 127.0.0.1:9002 --rate 10000000 --cfo 3000 --snr 30 --seconds 60
-```
-
-`channel --mbps` 限制 StreamLink 数据报总速率（包括36字节协议开销），不代表物理层码率。`iq-channel --rate` 是基带采样率对应的最小帧间隔预算，实际处理也受CPU限制。
-
-`rx` 默认锁定第一个有效会话。重启发送端后请重启接收端，避免混入上一次会话。可以指定 `--session <id>`。当前不对媒体流做乱序重排；序号用于去重，MPEG-TS通过自身连续计数识别丢失。
-
-## 视频与摄像头
-
-`video-demo.ps1` 的图案/文件演示不需要摄像头权限。真实摄像头需要先枚举设备：
-
-```text
-ffmpeg -list_devices true -f dshow -i dummy
-```
-
-随后把编码器输入换为 `-f dshow -i video="实际摄像头名称"`。摄像头实际支持的分辨率/帧率需验证。输出必须保留：
-
-```text
--c:v libx264 -preset ultrafast -tune zerolatency -b:v 6M -maxrate 6M -bufsize 600k -g 30 -bf 0 -pix_fmt yuv420p -f mpegts "udp://127.0.0.1:5600?pkt_size=1316"
-```
-
-6 Mbps 是编码目标；封装、峰值和队列需要余量。`ingress` 拒绝超过1400字节的数据报，不会悄悄截断。
-
-## 自动验收
-
-```powershell
-& 'C:\Python312（64bits）\python.exe' .\tests\integration.py
-& 'C:\Python312（64bits）\python.exe' .\tests\video_smoke.py
-```
-
-UHD 接入步骤见 `docs/HARDWARE.md`。性能口径和下一阶段验收见 `docs/DESIGN.md`。
+旧的四进程实验教程保存在 `docs/LEGACY_README.md`。它不再是实时摄像头图传的操作入口。

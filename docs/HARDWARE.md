@@ -1,5 +1,7 @@
 # X310接入与RK3588迁移
 
+> 本文保留早期 `legacy` 实验程序的硬件调试方法。实时摄像头图传请优先看根目录 README、transmitter/README.md 和 receiver/README.md。原 src/、include/ 现分别位于 legacy/src/、shared/include/。
+
 ## 当前已知
 
 - 用户共有三台X310；子板型号未知。

@@ -10,7 +10,7 @@ if($Sysroot){
   $gccRoot=Join-Path (Split-Path $Sysroot -Parent) 'lib/gcc/x86_64-w64-mingw32'
   if(Test-Path $gccRoot){$gcc=Get-ChildItem $gccRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1;$extra+=@('-L',$gcc.FullName)}
 }
-& $Compiler @extra -std=c++17 -O3 -Wall -Wextra -Wpedantic -I "$root\include" "$root\src\main.cpp" -o "$root\build\streamlink.exe" -lws2_32
+& $Compiler @extra -std=c++17 -O3 -Wall -Wextra -Wpedantic -I "$root\shared\include" "$root\legacy\src\main.cpp" -o "$root\build\streamlink.exe" -lws2_32
 if($LASTEXITCODE -ne 0){throw 'Build failed'}
 & "$root\build\streamlink.exe" selftest
 if($LASTEXITCODE -ne 0){throw 'Selftest failed'}

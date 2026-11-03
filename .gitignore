@@ -4,3 +4,5 @@ out/
 *.log
 tools/
 release/
+__pycache__/
+*.pyc
